@@ -6,7 +6,9 @@
 #include "cpu/add_cpu.hpp"
 
 namespace llaisys::ops {
+// 加法的调度层. 不直接进行每个元素的加法, 负责: 检查参数, 判断设备, 选择 CPU 还是 GPU 实现
 void add(tensor_t c, tensor_t a, tensor_t b) {
+    // 三个参数的设备要一致, 形状要相同, 类型要相同, 数据布局需连续
     CHECK_SAME_DEVICE(c, a, b);
     // Only support contiguous inputs with same shape for now.
     CHECK_SAME_SHAPE(c->shape(), a->shape(), b->shape());
@@ -14,6 +16,7 @@ void add(tensor_t c, tensor_t a, tensor_t b) {
     ASSERT(c->isContiguous() && a->isContiguous() && b->isContiguous(), "Add: all tensors must be contiguous.");
 
     // always support cpu calculation
+    // CPU路径
     if (c->deviceType() == LLAISYS_DEVICE_CPU) {
         return cpu::add(c->data(), a->data(), b->data(), c->dtype(), c->numel());
     }

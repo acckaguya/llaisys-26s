@@ -1,7 +1,62 @@
 #include "op.hpp"
 
+#include "../../core/llaisys_core.hpp"
+#include "../../utils.hpp"
+#include "cpu/rope_cpu.hpp"
+
 namespace llaisys::ops {
+
 void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
-    TO_BE_IMPLEMENTED();
+    CHECK_SAME_DEVICE(out, in, pos_ids);
+    CHECK_SAME_DTYPE(out->dtype(), in->dtype());
+    CHECK_SAME_SHAPE(out->shape(), in->shape());
+
+    CHECK_ARGUMENT(out->ndim() == 3, "rope output must be a 3D tensor");
+    CHECK_ARGUMENT(in->ndim() == 3, "rope input must be a 3D tensor");
+    CHECK_ARGUMENT(pos_ids->ndim() == 1, "rope pos_ids must be a 1D tensor");
+    CHECK_ARGUMENT(
+        pos_ids->dtype() == LLAISYS_DTYPE_I64,
+        "rope pos_ids must use int64 dtype"
+    );
+
+    const size_t seq_len = in->shape()[0];
+    const size_t n_heads = in->shape()[1];
+    const size_t head_dim = in->shape()[2];
+
+    CHECK_ARGUMENT(
+        pos_ids->shape()[0] == seq_len,
+        "rope pos_ids length must equal sequence length"
+    );
+    CHECK_ARGUMENT(
+        head_dim > 0 && head_dim % 2 == 0,
+        "rope head dimension must be positive and even"
+    );
+    CHECK_ARGUMENT(theta > 0.0f, "rope theta must be positive");
+
+    ASSERT(
+        out->isContiguous() && in->isContiguous()
+            && pos_ids->isContiguous(),
+        "RoPE: all tensors must be contiguous."
+    );
+
+    if (out->deviceType() == LLAISYS_DEVICE_CPU) {
+        return cpu::rope(
+            out->data(), in->data(), pos_ids->data(), out->dtype(),
+            seq_len, n_heads, head_dim, theta
+        );
+    }
+
+    core::context().setDevice(out->deviceType(), out->deviceId());
+
+    switch (out->deviceType()) {
+#ifdef ENABLE_NVIDIA_API
+    case LLAISYS_DEVICE_NVIDIA:
+        TO_BE_IMPLEMENTED();
+        return;
+#endif
+    default:
+        EXCEPTION_UNSUPPORTED_DEVICE;
+    }
 }
+
 } // namespace llaisys::ops
