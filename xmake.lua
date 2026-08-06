@@ -106,17 +106,13 @@ target("llaisys")
     set_languages("cxx17")
     set_warnings("all", "error")
     add_files("src/llaisys/*.cc")
+    add_files("src/models/*/*.cpp")
     set_installdir(".")
 
     
-    after_install(function (target)
+    after_build(function (target)
         -- copy shared library to python package
         print("Copying llaisys to python/llaisys/libllaisys/ ..")
-        if is_plat("windows") then
-            os.cp("bin/*.dll", "python/llaisys/libllaisys/")
-        end
-        if is_plat("linux") then
-            os.cp("lib/*.so", "python/llaisys/libllaisys/")
-        end
+        os.cp(target:targetfile(), "python/llaisys/libllaisys/")
     end)
 target_end()

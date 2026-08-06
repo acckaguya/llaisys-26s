@@ -250,9 +250,70 @@ conda run -n llaisys python test/ops/swiglu.py
 
 ## 作业 3：Qwen2 模型推理
 
-状态：未开始。
+状态：已完成。模型创建、权重加载、完整前向推理、KV Cache 和增量生成均已实现，并通过与 Hugging Face 的 argmax 生成对照测试。
 
-计划实现模型权重加载、Qwen2 前向推理和 KV Cache，并与 PyTorch 基准结果进行对照。
+### 3.1 模型创建与权重加载
+
+新增 Qwen2 C++ 模型、C API 和 ctypes 包装：
+
+- `src/models/qwen2/model.hpp`、`model.cpp`：根据模型元数据创建并管理权重 Tensor；
+- `src/llaisys/qwen2.cc`：实现模型创建、销毁、原始权重访问、按名称加载和加载计数接口；
+- `python/llaisys/libllaisys/qwen2.py`：声明 Qwen2 元数据、权重结构和 C API；
+- `python/llaisys/models/qwen2.py`：读取 `config.json` 和 safetensors，并加载 BF16 权重；
+- `xmake.lua`：编译 Qwen2 模型源码，并在构建后更新 Python 包中的共享库。
+
+DeepSeek-R1-Distill-Qwen-1.5B 共创建并加载 339 个权重，其中包括 3 个全局权重和每层 12 个权重。实际模型加载成功，权重名称、形状和字节数检查均通过。
+
+### 3.2 完整前向推理
+
+当前 `Qwen2Model::infer` 已实现以下完整流程：
+
+```text
+Token IDs -> Embedding
+-> 28 x (RMSNorm -> Q/K/V -> RoPE -> Self-Attention -> O Projection
+         -> Residual -> RMSNorm -> Gate/Up -> SwiGLU -> Down -> Residual)
+-> Final RMSNorm -> Last Token -> LM Head -> Argmax
+```
+
+Q、K、V 分别按 `[seq, 12, 128]`、`[seq, 2, 128]`、`[seq, 2, 128]` 参与注意力计算。实现支持输入完整 token 序列，并根据最后一个位置的 logits 返回 argmax token。
+
+### 3.3 对照结果
+
+使用本地 DeepSeek-R1-Distill-Qwen-1.5B BF16 权重进行验证：
+
+```text
+输入 [1]    ：LLAISYS = 22573，Hugging Face = 22573
+输入 [1, 2] ：LLAISYS = 3，    Hugging Face = 3
+```
+
+第二组输入同时覆盖非零位置 RoPE 和多 token 因果注意力，结果与 Hugging Face 完全一致。
+
+### 3.4 KV Cache 与增量生成
+
+模型为每一层维护独立的 K Cache 和 V Cache，形状均为 `[capacity, num_kv_heads, head_dim]`。每次开始生成前，通过 C API 按提示词长度与最大生成长度重置 Cache。
+
+首次推理输入完整提示词，将各层产生的 K/V 写入 Cache；后续每轮仅输入上一步生成的 token，并使用绝对位置执行 RoPE。新产生的 K/V 追加到已有 Cache，Self-Attention 则读取从起点到当前位置的全部 K/V。所有层完成后统一更新 Cache 长度，避免不同层看到不一致的位置。
+
+Python `generate()` 已实现以下流程：
+
+- 重置 KV Cache；
+- 首轮输入完整提示词，后续每轮只输入一个新 token；
+- 将 C++ 返回的 argmax token 追加到输出；
+- 遇到 EOS 或达到 `max_new_tokens` 时停止。
+
+### 3.5 最终验证
+
+执行以下命令进行短序列生成对照：
+
+```bash
+conda run -n llaisys env PYTHONPATH=python python test/test_infer.py \
+  --model /path/to/DeepSeek-R1-Distill-Qwen-1.5B \
+  --test --max_steps 2
+```
+
+Hugging Face 和 LLAISYS 均在相同提示词后生成 token `91786`、`0`，解码内容一致，测试输出为 `Test passed!`。这表明权重加载、完整提示词前向计算、KV Cache 追加、增量位置编码和 argmax 生成流程已经贯通。
+
+当前实现以 CPU 正确性为目标，性能仍有优化空间；Cache 读取会生成连续副本，后续可通过让注意力算子直接读取有效 Cache 区间来减少复制。
 
 ## 作业 4：CUDA 支持
 
@@ -279,4 +340,4 @@ conda run -n llaisys python test/ops/swiglu.py
 - 必须在 `llaisys` Conda 环境中运行测试；
 - 修改 C++ 代码后需要先执行 `xmake install`，否则 Python 可能继续加载旧的共享库；
 - 作业 2 的八个 CPU 算子均已通过各自测试；仓库当前没有 `test/test_ops.py` 聚合脚本；
-- 当前 LLAISYS 的 Qwen2 推理尚未实现，模型推理测试中的 LLAISYS 结果暂为空。
+- Qwen2 的权重加载、完整前向推理、KV Cache 增量生成和 argmax 对照测试均已通过。
