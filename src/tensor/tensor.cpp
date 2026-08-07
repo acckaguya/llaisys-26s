@@ -399,37 +399,34 @@ tensor_t Tensor::to(llaisysDeviceType_t device_type, int device) const {
         device
     );
 
-    size_t bytes = this->numel() * this->elementSize();
+    const size_t bytes = this->numel() * this->elementSize();
+    const auto source_type = this->deviceType();
+    const int source_device = this->deviceId();
 
-    core::context().setDevice(
-        device_type,
-        device
-    );
+    if (source_type == LLAISYS_DEVICE_CPU
+        && device_type != LLAISYS_DEVICE_CPU) {
+        core::context().setDevice(device_type, device);
 
-    auto *api = core::context().runtime().api();
-
-    if(
-        this->deviceType() == LLAISYS_DEVICE_CPU
-        && device_type != LLAISYS_DEVICE_CPU
-    ) {
-        api->memcpy_sync(
+        core::context().runtime().api()->memcpy_sync(
             result->data(),
             this->data(),
             bytes,
             LLAISYS_MEMCPY_H2D
         );
-    } else if (
-        this->deviceType() != LLAISYS_DEVICE_CPU
-        && device_type == LLAISYS_DEVICE_CPU
-    ) {
-        api->memcpy_sync(
+    } else if (source_type != LLAISYS_DEVICE_CPU
+        && device_type == LLAISYS_DEVICE_CPU) {
+        core::context().setDevice(source_type, source_device);
+
+        core::context().runtime().api()->memcpy_sync(
             result->data(),
             this->data(),
             bytes,
             LLAISYS_MEMCPY_D2H
         );
     } else {
-        api->memcpy_sync(
+        core::context().setDevice(device_type, device);
+
+        core::context().runtime().api()->memcpy_sync(
             result->data(),
             this->data(),
             bytes,

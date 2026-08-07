@@ -3,6 +3,9 @@
 #include "../../core/llaisys_core.hpp"
 #include "../../utils.hpp"
 #include "cpu/self_attention_cpu.hpp"
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/self_attention_nvidia.cuh"
+#endif
 
 namespace llaisys::ops {
 
@@ -94,8 +97,21 @@ void self_attention(
     switch (attn_val->deviceType()) {
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
-        return;
+        return nvidia::self_attention(
+            attn_val->data(),
+            q->data(),
+            k->data(),
+            v->data(),
+            attn_val->dtype(),
+            q_len,
+            kv_len,
+            n_heads,
+            n_kv_heads,
+            q_dim,
+            v_dim,
+            scale,
+            core::context().runtime().stream()
+        );
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;

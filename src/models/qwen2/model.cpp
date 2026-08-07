@@ -12,7 +12,6 @@
 
 #include <cmath>
 #include <vector>
-#include <cstring>
 
 namespace llaisys::models {
 
@@ -169,6 +168,13 @@ int64_t Qwen2Model::infer(
     const auto device = hidden->deviceType();
     const auto device_id = hidden->deviceId();
 
+    core::context().setDevice(device, device_id);
+    auto &runtime = core::context().runtime();
+    const auto cache_copy_kind =
+        device == LLAISYS_DEVICE_CPU
+            ? LLAISYS_MEMCPY_H2H
+            : LLAISYS_MEMCPY_D2D;
+
     const size_t q_size = _meta.nh * _meta.dh;
     const size_t kv_size = _meta.nkvh * _meta.dh;
     const float scale = 1.0f / std::sqrt(
@@ -290,8 +296,20 @@ int64_t Qwen2Model::infer(
 
         const size_t cache_bytes = ntoken * kv_size * k_rope->elementSize();
 
-        std::memcpy(k_write->data(), k_rope->data(), cache_bytes);
-        std::memcpy(v_write->data(), v_heads->data(), cache_bytes);
+        runtime.api()->memcpy_async(
+            k_write->data(),
+            k_rope->data(),
+            cache_bytes,
+            cache_copy_kind,
+            runtime.stream()
+        );
+        runtime.api()->memcpy_async(
+            v_write->data(),
+            v_heads->data(),
+            cache_bytes,
+            cache_copy_kind,
+            runtime.stream()
+        );
 
         auto k_all = _k_cache[layer]->slice(0, 0, cache_end)->contiguous();
         auto v_all = _v_cache[layer]->slice(0, 0, cache_end)->contiguous();
