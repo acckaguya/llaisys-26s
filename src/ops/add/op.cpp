@@ -7,6 +7,9 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/add_nvidia.cuh"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/add_metax.hpp"
+#endif
 
 namespace llaisys::ops {
 // 加法的调度层. 不直接进行每个元素的加法, 负责: 检查参数, 判断设备, 选择 CPU 还是 GPU 实现
@@ -33,6 +36,11 @@ void add(tensor_t c, tensor_t a, tensor_t b) {
     case LLAISYS_DEVICE_NVIDIA:
         return nvidia::add(c->data(), a->data(), b->data(), c->dtype(),
                            c->numel(), llaisys::core::context().runtime().stream());
+#endif
+#ifdef ENABLE_METAX_API
+    case LLAISYS_DEVICE_METAX:
+        return metax::add(c->data(), a->data(), b->data(), c->dtype(),
+                          c->numel(), llaisys::core::context().runtime().stream());
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;

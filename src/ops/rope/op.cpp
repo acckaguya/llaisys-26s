@@ -6,6 +6,9 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/rope_nvidia.cuh"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/rope_metax.hpp"
+#endif
 
 namespace llaisys::ops {
 
@@ -55,6 +58,20 @@ void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
         return nvidia::rope(
+            out->data(),
+            in->data(),
+            pos_ids->data(),
+            out->dtype(),
+            seq_len,
+            n_heads,
+            head_dim,
+            theta,
+            core::context().runtime().stream()
+        );
+#endif
+#ifdef ENABLE_METAX_API
+    case LLAISYS_DEVICE_METAX:
+        return metax::rope(
             out->data(),
             in->data(),
             pos_ids->data(),

@@ -599,6 +599,167 @@ Hugging Face 与 LLAISYS 均生成 token `91786`、`0`，最终输出 `Test pass
 
 作业四后续新增机器适配、性能优化或新 CUDA 算子时，应继续在本节记录目标设备、计算能力、软件版本、代码路径、验证命令、结果和仍存在的限制。
 
+## 作业 5：MetaX 曦云 C500 原生适配
+
+### 5.1 背景与目标
+
+在保留 CPU / NVIDIA 后端的前提下，将 llaisys 移植到本机 **MetaX 曦云 C500**（沐曦通用 GPGPU）。要求：
+
+- 采用 **C500 原生 MXMACA（`mc_*` API）** 开发，编写对应的 runtime 与算子实现（不使用 cu-bridge CUDA 复用路线）；
+- **保持设备间代码隔离**：metax 代码独立于 CPU / NVIDIA，互不干扰；
+- 完整打通 构建 → Runtime → 8 个算子 → Qwen2 端到端推理。
+
+平台知识库见 `/root/metax-xuyun-c500/`，移植计划见 `/root/llaisys-metax-porting-plan/`（本节即移植计划与过程的整合记录）。
+
+### 5.2 平台与环境
+
+| 项 | 值 |
+|----|----|
+| GPU | MetaX C500（曦云 C500）× 1，64 GiB 显存 |
+| 驱动 / SDK | KMD 3.8.30 / MACA 3.3.0.15（`/opt/maca`） |
+| 原生编译器 | `mxcc`（`/opt/maca/mxgpu_llvm/bin/mxcc`，LLVM 基） |
+| 库 | `libmcruntime.so`（≈CUDA Runtime）、`libmcblas.so`（≈cuBLAS） |
+| 构建工具 | Xmake 3.1.0（root 下需 `XMAKE_ROOT=y`） |
+| Python | torch `2.8.0+metax3.3.0.2`（`torch.cuda` 直接可用，设备名 `MetaX C500`） |
+| 测试模型 | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B`（`/data/models/qwen15b`） |
+
+### 5.3 移植计划（M0–M5）
+
+```
+M0 环境与冒烟 ──> M1 设备分发 ──> M2 构建 ──> M3 算子验证 ──> M4 Python 集成 ──> M5 推理对拍
+```
+
+| 阶段 | 内容 | 结果 |
+|------|------|------|
+| M0 | 安装 xmake；原生 MC 冒烟（kernel + `mcMalloc/mcMemcpy` + `mcblasGemmEx`(BF16)） | ✅ 全通过，确定原生路线 |
+| M1 | `LLAISYS_DEVICE_METAX` 枚举、runtime 分发、metax runtime/算子目录 | ✅ |
+| M2 | `xmake/metax.lua`（mxcc 编译 + 对象合并）、`--mx-gpu=y` | ✅ 100% 构建 |
+| M3 | 8 个算子 GPU 对拍（f32/f16/bf16） | ✅ 全通过 |
+| M4 | Python `metax` 映射、runtime/tensor/utils 测试 | ✅ |
+| M5 | 模型下载、端到端 token 对拍 | ✅ `Test passed!` |
+
+### 5.4 原生 MXMACA 技术要点
+
+编译：
+
+```bash
+export MACA_PATH=/opt/maca
+mxcc -x maca -std=c++17 -offload-arch native -fPIC \
+     -I $MACA_PATH/include/mcr -I $MACA_PATH/include/mcblas \
+     -I $MACA_PATH/include/common -I $MACA_PATH/include \
+     --maca-path=$MACA_PATH -c src.mc -o src.o
+# 链接：-L $MACA_PATH/lib -lmcruntime -lmcblas
+```
+
+API 与 CUDA 一一对应：`mcGetDeviceCount/mcSetDevice/mcDeviceSynchronize`、`mcStreamCreate/Destroy/Synchronize`、`mcMalloc/mcFree`、`mcMallocHost/mcFreeHost`、`mcMemcpy/mcMemcpyAsync`、`mcblasGemmEx`。要点：
+
+- `mcMemcpyKind` 与 `llaisysMemcpyKind_t` 数值一致（H2H=0, H2D=1, D2H=2, D2D=3）；
+- `MACA_R_32F/16F/16BF` = `0/2/14`，与 CUDA `CUDA_R_*` 数值一致；
+- 数据类型/转换函数与 CUDA 同名（`__half`、`maca_bfloat16`、`__half2float`、`__bfloat162float` 等），kernel 逻辑可直接改写；
+- 编译要点：`-x maca` 强制语言；`-std=c++17`（否则 `std::byte` 报错）；`-fPIC`（共享库必需）。
+
+冒烟验证：`/root/m0-smoke/smoke_mc.cpp`（kernel + 内存/拷贝 + 流 + `mcblasGemmEx`(BF16)）用 `mxcc` 编译运行**全部通过**，确认原生 MC 编译、链接、kernel 启动、mcBLAS 全链路可用，作为 M0 路线决策依据。
+
+### 5.5 代码改动（设备隔离）
+
+公共层：
+
+- `include/llaisys.h`：`LLAISYS_DEVICE_METAX = 2`；
+- `src/device/runtime_api.hpp/.cpp`：`ENABLE_METAX_API` 下声明并分发 `metax::getRuntimeAPI()`；
+- `python/llaisys/libllaisys/llaisys_types.py`：`DeviceType.METAX`；
+- `test/test_utils.py`：`metax` 设备映射；关闭 TF32（见 5.8）；
+- `test/test_runtime.py`、`test/test_infer.py`、`test/ops/*.py`：`--device` 增加 `metax`。
+
+新增（全部隔离在 `metax` 目录，不触碰 nvidia/cpu）：
+
+```
+src/device/metax/metax_runtime_api.{hpp,mc}          # 原生 mc_* runtime
+src/ops/{add,argmax,embedding,linear,rms_norm,rope,self_attention,swiglu}/metax/*.{hpp,mc}
+xmake/metax.lua                                      # 构建目标
+```
+
+每个 `op.cpp` 增加与 NVIDIA 对称的分支（`#ifdef ENABLE_METAX_API case LLAISYS_DEVICE_METAX`）。
+`linear` 用 `mcblasGemmEx`（`MCBLAS_OP_T`）；`self_attention` 临时分数缓冲用 `mcMalloc/mcFree`
+（等价原 `cudaMallocAsync` 语义，兼容性最稳）。
+
+### 5.6 构建系统与踩坑
+
+`xmake.lua` 新增 `--mx-gpu` 选项（`has_config("mx-gpu")` 时 `add_defines("ENABLE_METAX_API")` + include `xmake/metax.lua`）。
+`xmake/metax.lua` 的 metax 静态库目标：`on_load` 钩子调用 `mxcc` 增量编译 `.mc` → `build/metax-objs/*.o`，
+`target:add("files", obj)` 动态注册，`add_rules("c++")` 提供对象合并；`mcruntime/mcblas` 挂在 metax 静态库上经 `add_deps` 传播链接。
+
+构建踩坑（均有验证记录）：
+
+| 尝试 | 结果 | 结论 |
+|------|------|------|
+| 自定义 `rule` + `on_build_file` + `set_extensions(".mc")` | `.o` 生成但静态库归档为空（8 字节） | 对象按 sourcekind 归类，`.mc` 无语言定义 |
+| `sourcekind="maca"` | `no suitable linker for static.{maca}` | 需注册 ar 工具 |
+| `sourcekind="cxx"` | g++ 编译（不识 `__global__`） | sourcekind 决定默认编译器 |
+| 自定义 `toolchain("maca")`（`xmake/toolchains/`） | `cannot find known tool script for mxcc` | 需 `find_<name>` 检测器 |
+| **`on_load` + `mxcc` 编译 + `target:add("files", obj)` + `add_rules("c++")`** | **✅ 归档成功** | 最终方案 |
+
+其它：共享库需 `-fPIC`；g++ 默认 `--as-needed` 会丢弃 `libmcblas` → 链接经 metax 静态库传播，排在引用它的静态库之后。
+
+构建命令：
+
+```bash
+export PATH=/root/.local/bin:$PATH XMAKE_ROOT=y MACA_PATH=/opt/maca
+cd /root/llaisys-26s
+xmake f --mx-gpu=y -c
+xmake
+```
+
+产物 `libllaisys.so`（含 22 个 metax 导出符号）自动复制到 `python/llaisys/libllaisys/`。
+
+### 5.7 验证结果
+
+Runtime：
+
+```bash
+LD_LIBRARY_PATH=/opt/maca/lib PYTHONPATH=python:test python test/test_runtime.py --device metax
+# Found 1 metax devices / Test passed!
+```
+
+算子：`add`、`argmax`、`embedding`、`linear`、`rms_norm`、`rope`、`self_attention`、`swiglu`
+在 f32/f16/bf16 下**全部 Passed**（`python test/ops/<op>.py --device metax`）。
+
+端到端推理对拍：
+
+```bash
+LD_LIBRARY_PATH=/opt/maca/lib PYTHONPATH=python:test \
+  python test/test_infer.py --device metax --model /data/models/qwen15b --test
+# Test passed!（llaisys token 与 HF 完全一致；0.77s vs HF 2.72s）
+```
+
+### 5.8 平台差异与解决（TF32）
+
+- **现象**：`linear`/`self_attention` 的 f32 用例对拍失败，差异 ~1e-4；
+- **根因**：MetaX 定制 PyTorch 默认 `allow_tf32=True`、`float32_matmul_precision="high"`
+  （NVIDIA PyTorch 2.x 默认 False），torch reference 用 TF32 降精度；
+- **验证**：llaisys metax kernel 与 CPU float64 参考差异为 **0**，而 torch 结果差 1.86e-4 → 是 torch 侧降精度，非实现错误；
+- **修复**：`test/test_utils.py` 顶部统一关闭：
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+```
+
+其它：补充 Python 依赖 `pip install ml_dtypes accelerate`。
+
+### 5.9 与 cu-bridge 路线对比（备选）
+
+本次按用户要求采用**原生 MXMACA** 路线。cu-bridge 路线（CUDA 源码直接 `cucc` 编译）经静态探测同样可行：
+`cudaMallocAsync→wcudaMallocAsync`、`cublasGemmEx→mcblasGemmEx`、`CUDA_R_*`/`CUBLAS_COMPUTE_*` 与 MC 枚举数值一致，
+可作为后续快速接入现有 CUDA 生态的备选路径。原生路线的优点是直接使用 `mc_*` API、无 wrapper 间接层、便于针对 C500 优化。
+
+### 5.10 当前限制与后续优化
+
+- `self_attention` 临时缓冲为同步分配，可改用流序分配（`mcMallocAsync` 等价物）减少同步开销；
+- f32 linear 可对比 `mcblasSgemm` 与 `mcblasGemmEx` 的精度/性能；
+- 可引入 `mcTracer`（`/opt/maca/bin/mcTracer`）做算子级性能分析；
+- 当前仅单卡支持（`llaisysQwen2ModelCreate` 限制），多卡需扩展；
+- 手写 kernel 可进一步替换为 `libmctlassEx` / TileLang 实现以提升性能。
+
 ## 进阶功能状态
 
 以下函数已有实现草稿并已通过编译检查：
@@ -619,4 +780,6 @@ Hugging Face 与 LLAISYS 均生成 token `91786`、`0`，最终输出 `Test pass
 - 修改 C++ 代码后需要执行 `xmake`；构建完成后共享库会自动复制到 Python 包目录；
 - Qwen2 的权重加载、完整前向推理、KV Cache 增量生成和 argmax 对照测试均已通过；
 - 作业 4 的 NVIDIA Runtime、八个 CUDA 算子和 Qwen2 两步增量推理均已通过；
-- 作业 4 使用 `native + compute_80` 自动生成当前 GPU 的 SASS 并保留 PTX 回退；迁移机器时仍必须检查计算能力与 CUDA/PyTorch/驱动兼容关系。
+- 作业 4 使用 `native + compute_80` 自动生成当前 GPU 的 SASS 并保留 PTX 回退；迁移机器时仍必须检查计算能力与 CUDA/PyTorch/驱动兼容关系；
+- 作业 5 的 MetaX 原生后端已在本机 C500 通过 Runtime、八个算子和 Qwen2 端到端推理对拍；构建需 `xmake f --mx-gpu=y`，运行需 `LD_LIBRARY_PATH=/opt/maca/lib`；
+- metax 环境注意：torch 默认开启 TF32（测试对拍需关闭）；Qwen2 Python 依赖需 `ml_dtypes`、`accelerate`。

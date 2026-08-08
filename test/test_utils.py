@@ -1,6 +1,12 @@
 import llaisys
 import torch
 
+# MetaX 定制 PyTorch 默认开启 TF32（float32_matmul_precision=high），
+# 会使 torch reference 的 f32 矩阵乘降精度，导致与精确实现（如 metax 后端）
+# 的对拍出现 ~1e-4 差异。测试中统一关闭，保证与 CPU/NVIDIA 一致的精度语义。
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 
 def random_tensor(
     shape, dtype_name, device_name, device_id=0, scale=None, bias=None
@@ -188,6 +194,9 @@ def torch_device(device_name: str, device_id=0):
         return torch.device("cpu")
     elif device_name == "nvidia":
         return torch.device(f"cuda:{device_id}")
+    elif device_name == "metax":
+        # MetaX 定制 PyTorch 通过 cuda 接口访问曦云 GPU
+        return torch.device(f"cuda:{device_id}")
     else:
         raise ValueError(f"Unsupported device name: {device_name}")
 
@@ -197,6 +206,8 @@ def llaisys_device(device_name: str):
         return llaisys.DeviceType.CPU
     elif device_name == "nvidia":
         return llaisys.DeviceType.NVIDIA
+    elif device_name == "metax":
+        return llaisys.DeviceType.METAX
     else:
         raise ValueError(f"Unsupported device name: {device_name}")
 
@@ -206,6 +217,8 @@ def device_name(llaisys_device: llaisys.DeviceType):
         return "cpu"
     elif llaisys_device == llaisys.DeviceType.NVIDIA:
         return "nvidia"
+    elif llaisys_device == llaisys.DeviceType.METAX:
+        return "metax"
     else:
         raise ValueError(f"Unsupported llaisys device: {llaisys_device}")
 
