@@ -98,6 +98,13 @@ void self_attention(
     );
 
     switch (attn_val->deviceType()) {
+    case LLAISYS_DEVICE_CPU:
+        return cpu::self_attention(
+            attn_val->data(), q->data(), k->data(), v->data(),
+            attn_val->dtype(),
+            q_len, kv_len, n_heads, n_kv_heads,
+            q_dim, v_dim, scale
+        );
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
         return nvidia::self_attention(
