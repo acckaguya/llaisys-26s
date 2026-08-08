@@ -11,9 +11,94 @@
 - 系统 CUDA Toolkit：12.9
 - NVIDIA 驱动：575.51.03
 - CUDA 测试设备：NVIDIA L20，计算能力 8.9
-- 设备状态：CPU 与 NVIDIA CUDA 均可用；PyTorch CUDA 12.8 可在当前驱动上正常工作。
+- 设备支持状态：CPU、NVIDIA CUDA 和 MetaX MXMACA 三种推理后端均已完成；NVIDIA 在 L20 上验证，MetaX 在独立的曦云 C500 环境上验证。
 - 测试模型：`DeepSeek-R1-Distill-Qwen-1.5B`
 - 模型权重和 tokenizer 已完整下载，并可由 Transformers 离线加载。
+
+## 三种设备的编译与推理命令
+
+以下命令均从项目根目录执行。CPU 和 NVIDIA 环境使用的模型目录为
+`/data/home/caiwl/models/DeepSeek-R1-Distill-Qwen-1.5B`；MetaX 验证机使用
+`/data/models/qwen15b`。迁移到其他机器时只需将 `MODEL_PATH` 改为实际模型目录。
+
+每次切换设备后必须重新执行 `xmake f -c`。其中 `-c` 会清理旧的 Xmake 配置缓存，
+而显式设置 `--nv-gpu` 和 `--mx-gpu` 可以避免误用上一次构建生成的共享库。
+构建成功后，`libllaisys.so` 会自动复制到 `python/llaisys/libllaisys/`。
+
+### CPU
+
+CPU 构建不启用任何 GPU 后端，适用于普通 Linux 开发机和 GitHub Actions 的 Ubuntu 作业：
+
+```bash
+conda activate llaisys
+export PYTHONPATH="$PWD/python"
+export MODEL_PATH=/data/home/caiwl/models/DeepSeek-R1-Distill-Qwen-1.5B
+
+xmake f -c --nv-gpu=n --mx-gpu=n
+xmake
+
+python test/test_runtime.py --device cpu
+python test/test_infer.py \
+    --device cpu \
+    --model "$MODEL_PATH" \
+    --test \
+    --max_steps 2
+```
+
+### NVIDIA CUDA
+
+NVIDIA 构建要求 CUDA Toolkit、驱动和 cuBLAS 可用。构建配置使用
+`native + compute_80`，会为当前可见 GPU 生成原生 SASS，并保留 Ampere PTX 回退：
+
+```bash
+conda activate llaisys
+export PYTHONPATH="$PWD/python"
+export MODEL_PATH=/data/home/caiwl/models/DeepSeek-R1-Distill-Qwen-1.5B
+
+nvidia-smi
+xmake f -c --nv-gpu=y --mx-gpu=n
+xmake
+
+python test/test_runtime.py --device nvidia
+python test/test_infer.py \
+    --device nvidia \
+    --model "$MODEL_PATH" \
+    --test \
+    --max_steps 2
+```
+
+### MetaX MXMACA
+
+MetaX 构建在曦云 C500 验证机上执行，要求 MACA SDK 位于 `/opt/maca`，并使用
+原生 `mxcc`、`libmcruntime.so` 和 `libmcblas.so`。当前验证机以 root 用户构建，
+因此需要设置 `XMAKE_ROOT=y`：
+
+```bash
+conda activate llaisys
+export MACA_PATH=/opt/maca
+export PATH=/root/.local/bin:$PATH
+export LD_LIBRARY_PATH="$MACA_PATH/lib:${LD_LIBRARY_PATH:-}"
+export PYTHONPATH="$PWD/python:$PWD/test"
+export MODEL_PATH=/data/models/qwen15b
+export XMAKE_ROOT=y
+
+xmake f -c --nv-gpu=n --mx-gpu=y
+xmake
+
+python test/test_runtime.py --device metax
+python test/test_infer.py \
+    --device metax \
+    --model "$MODEL_PATH" \
+    --test \
+    --max_steps 2
+```
+
+上述 `--max_steps 2` 是覆盖首次完整前向和第二步 KV Cache 增量推理的快速验证。
+需要执行完整生成对拍时，去掉该参数，使用测试脚本默认的生成步数。单算子验证统一使用：
+
+```bash
+python test/ops/<operator>.py --device <cpu|nvidia|metax>
+```
 
 ## 作业 0：环境、构建与模型
 
@@ -320,7 +405,7 @@ Hugging Face 和 LLAISYS 均在相同提示词后生成 token `91786`、`0`，�
 
 ## 作业 4：CUDA 支持
 
-状态：NVIDIA CUDA 后端已完成。NVIDIA Runtime、八个 CUDA 算子和 Qwen2 增量推理均已接入并完成验证；作业要求的第二款 CUDA 或类 CUDA 平台仍待适配。
+状态：NVIDIA CUDA 后端已完成。NVIDIA Runtime、八个 CUDA 算子和 Qwen2 增量推理均已接入并完成验证；第二款类 CUDA 平台 MetaX MXMACA 的适配结果记录在作业 5。
 
 ### 4.1 实现范围与文件组织
 

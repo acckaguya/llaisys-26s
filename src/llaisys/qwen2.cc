@@ -4,9 +4,42 @@
 #include "../models/qwen2/model.hpp"
 #include "../utils.hpp"
 
+#include <cstdio>
+#include <exception>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace {
+
+void logApiError(const char *api, const char *message) noexcept {
+    std::fprintf(stderr, "[ERROR] %s failed: %s\n", api, message);
+}
+
+template <typename Result, typename Function>
+Result guardApi(const char *api, Result failure, Function &&function) noexcept {
+    try {
+        return function();
+    } catch (const std::exception &error) {
+        logApiError(api, error.what());
+    } catch (...) {
+        logApiError(api, "unknown exception");
+    }
+    return failure;
+}
+
+template <typename Function>
+void guardApi(const char *api, Function &&function) noexcept {
+    try {
+        function();
+    } catch (const std::exception &error) {
+        logApiError(api, error.what());
+    } catch (...) {
+        logApiError(api, "unknown exception");
+    }
+}
+
+}
 
 struct LlaisysQwen2Model {
     static constexpr size_t LAYER_WEIGHT_GROUPS = 12;
@@ -83,22 +116,36 @@ LlaisysQwen2Model *llaisysQwen2ModelCreate(
     int *device_ids,
     int ndevice
 ) {
-    CHECK_ARGUMENT(meta != nullptr, "Qwen2 meta is null");
-    CHECK_ARGUMENT(device_ids != nullptr, "Qwen2 device IDs are null");
-    CHECK_ARGUMENT(ndevice == 1, "only one device is supported");
+    return guardApi(
+        __func__,
+        static_cast<LlaisysQwen2Model *>(nullptr),
+        [&]() {
+            CHECK_ARGUMENT(meta != nullptr, "Qwen2 meta is null");
+            CHECK_ARGUMENT(device_ids != nullptr, "Qwen2 device IDs are null");
+            CHECK_ARGUMENT(ndevice == 1, "only one device is supported");
 
-    return new LlaisysQwen2Model(*meta, device, device_ids[0]);
+            return new LlaisysQwen2Model(*meta, device, device_ids[0]);
+        }
+    );
 }
 
 void llaisysQwen2ModelDestroy(LlaisysQwen2Model *model) {
-    delete model;
+    guardApi(__func__, [&]() {
+        delete model;
+    });
 }
 
 LlaisysQwen2Weights *llaisysQwen2ModelWeights(
     LlaisysQwen2Model *model
 ) {
-    CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
-    return &model->weights;
+    return guardApi(
+        __func__,
+        static_cast<LlaisysQwen2Weights *>(nullptr),
+        [&]() {
+            CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
+            return &model->weights;
+        }
+    );
 }
 
 void llaisysQwen2ModelLoadWeight(
@@ -107,16 +154,20 @@ void llaisysQwen2ModelLoadWeight(
     const void *data,
     size_t nbytes
 ) {
-    CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
-    CHECK_ARGUMENT(name != nullptr, "Qwen2 weight name is null");
-    model->impl.loadWeight(name, data, nbytes);
+    guardApi(__func__, [&]() {
+        CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
+        CHECK_ARGUMENT(name != nullptr, "Qwen2 weight name is null");
+        model->impl.loadWeight(name, data, nbytes);
+    });
 }
 
 size_t llaisysQwen2ModelLoadWeightCount(
     const LlaisysQwen2Model *model
 ) {
-    CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
-    return model->impl.loadedWeightCount();
+    return guardApi(__func__, size_t{0}, [&]() {
+        CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
+        return model->impl.loadedWeightCount();
+    });
 }
 
 int64_t llaisysQwen2ModelInfer(
@@ -124,18 +175,22 @@ int64_t llaisysQwen2ModelInfer(
     int64_t *token_ids,
     size_t ntoken
 ) {
-    CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
-    CHECK_ARGUMENT(token_ids != nullptr, "token IDs are null");
+    return guardApi(__func__, int64_t{-1}, [&]() {
+        CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
+        CHECK_ARGUMENT(token_ids != nullptr, "token IDs are null");
 
-    return model->impl.infer(token_ids, ntoken);
+        return model->impl.infer(token_ids, ntoken);
+    });
 }
 
 void llaisysQwen2ModelResetCache(
     LlaisysQwen2Model *model,
     size_t capacity
 ) {
-    CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
-    model->impl.resetCache(capacity);
+    guardApi(__func__, [&]() {
+        CHECK_ARGUMENT(model != nullptr, "Qwen2 model is null");
+        model->impl.resetCache(capacity);
+    });
 }
 
 }
